@@ -37,14 +37,14 @@ Define your suite as questions with expected tool usage, then run it in CI on ev
 ## Related
 
 - **[intake-triage-mcp](https://github.com/granolacowboy/intake-triage-mcp)** — the deterministic legal-intake MCP server this harness was built to gate.
-- **[llm-security-for-law-firms](https://github.com/granolacowboy/llm-security-for-law-firms)** — the security/adoption checklist that pairs with evaluation-driven delivery.
-
----
-
-<sub>Maintained by [Rich Berman](https://github.com/granolacowboy) / [MHSB Solutions](https://github.com/MHSBai). MIT licensed. Contributions welcome.</sub>
+- **[llm-security-for-law-firms](https://github.com/MHSBai/llm-security-for-law-firms)** — the security/adoption checklist that pairs with evaluation-driven delivery.
 
 ## Example
 
 A runnable example lives in [`examples/`](examples/) — the 10-pair golden suite from the
 flagship `intake-triage-mcp`, with run instructions. Point the harness at your own MCP
 server and suite to gate it the same way.
+
+---
+
+<sub>Maintained by [Rich Berman](https://github.com/granolacowboy) / [MHSB Solutions](https://github.com/MHSBai). MIT licensed. Contributions welcome.</sub>
