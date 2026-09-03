@@ -42,3 +42,9 @@ Define your suite as questions with expected tool usage, then run it in CI on ev
 ---
 
 <sub>Maintained by [Rich Berman](https://github.com/granolacowboy) / [MHSB Solutions](https://github.com/MHSBai). MIT licensed. Contributions welcome.</sub>
+
+## Example
+
+A runnable example lives in [`examples/`](examples/) — the 10-pair golden suite from the
+flagship `intake-triage-mcp`, with run instructions. Point the harness at your own MCP
+server and suite to gate it the same way.
