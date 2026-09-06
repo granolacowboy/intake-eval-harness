@@ -1,8 +1,8 @@
 # intake-eval-harness
 
-A small, deterministic **evaluation harness for MCP servers** — run a fixed set of task questions against a Model Context Protocol server, let a model use its tools, and score the results against expectations. Extracted from [`intake-triage-mcp`](https://github.com/granolacowboy/intake-triage-mcp), where it gates a legal-intake triage server.
+A small, deterministic **evaluation harness for MCP servers:** run a fixed set of task questions against a Model Context Protocol server, let a model use its tools, and score the results against expectations. Extracted from [`intake-triage-mcp`](https://github.com/granolacowboy/intake-triage-mcp), where it gates a legal-intake triage server.
 
-> Built on a simple principle: an AI capability isn't "done" because it demoed — it's done when it **passes an eval**. This is the harness that enforces that for tool-using MCP servers.
+> Built on a simple principle: an AI capability isn't "done" because it demoed. It's done when it **passes an eval**. This is the harness that enforces that for tool-using MCP servers.
 
 ## What it does
 
@@ -13,7 +13,7 @@ A small, deterministic **evaluation harness for MCP servers** — run a fixed se
 
 ## Why it exists
 
-Tool-using systems fail in ways a unit test doesn't catch: the model picks the wrong tool, skips a required gate, or hallucinates an answer instead of calling anything. This harness makes those failures **visible and regression-tested** — the difference between "applied AI in production" and a demo.
+Tool-using systems fail in ways a unit test doesn't catch: the model picks the wrong tool, skips a required gate, or hallucinates an answer instead of calling anything. This harness makes those failures **visible and regression-tested:** the difference between "applied AI in production" and a demo.
 
 ## Layout
 
@@ -36,12 +36,12 @@ Define your suite as questions with expected tool usage, then run it in CI on ev
 
 ## Related
 
-- **[intake-triage-mcp](https://github.com/granolacowboy/intake-triage-mcp)** — the deterministic legal-intake MCP server this harness was built to gate.
-- **[llm-security-for-law-firms](https://github.com/MHSBai/llm-security-for-law-firms)** — the security/adoption checklist that pairs with evaluation-driven delivery.
+- **[intake-triage-mcp](https://github.com/granolacowboy/intake-triage-mcp):** the deterministic legal-intake MCP server this harness was built to gate.
+- **[llm-security-for-law-firms](https://github.com/MHSBai/llm-security-for-law-firms):** the security/adoption checklist that pairs with evaluation-driven delivery.
 
 ## Example
 
-A runnable example lives in [`examples/`](examples/) — the 10-pair golden suite from the
+A runnable example lives in [`examples/`](examples/): the 10-pair golden suite from the
 flagship `intake-triage-mcp`, with run instructions. Point the harness at your own MCP
 server and suite to gate it the same way.
 
