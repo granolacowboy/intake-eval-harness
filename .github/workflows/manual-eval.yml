@@ -1,0 +1,92 @@
+name: Manual model-driven evaluation
+
+on:
+  workflow_dispatch:
+    inputs:
+      server_ref:
+        description: "intake-triage-mcp ref to evaluate"
+        required: true
+        default: "main"
+      model:
+        description: "Anthropic model identifier"
+        required: true
+        default: "claude-3-7-sonnet-20250219"
+      fail_under:
+        description: "Required overall pass percentage"
+        required: true
+        default: "100"
+
+permissions:
+  contents: read
+
+jobs:
+  evaluate:
+    runs-on: [self-hosted, gcd]
+    timeout-minutes: 30
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+    steps:
+      - name: Require explicit model credential
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$ANTHROPIC_API_KEY" || {
+            echo "::error::ANTHROPIC_API_KEY is not configured for this repository"
+            exit 1
+          }
+
+      - name: Checkout harness
+        uses: actions/checkout@v4
+
+      - name: Checkout target server
+        uses: actions/checkout@v4
+        with:
+          repository: granolacowboy/intake-triage-mcp
+          ref: ${{ inputs.server_ref }}
+          path: target-server
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install harness and target dependencies
+        run: |
+          python -m pip install -e .
+          python -m pip install -r target-server/requirements.txt
+
+      - name: Resolve target revision
+        id: target
+        shell: bash
+        run: echo "sha=$(git -C target-server rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Run golden suite
+        id: eval
+        continue-on-error: true
+        run: |
+          mcp-eval examples/intake-triage/evaluation.xml             -t stdio             -c python             -a target-server/server.py             -m "${{ inputs.model }}"             --server-revision "${{ steps.target.outputs.sha }}"             --run-label "github-actions/manual"             --fail-under "${{ inputs.fail_under }}"             -o evaluation-report.md
+
+      - name: Publish report to job summary
+        if: always()
+        shell: bash
+        run: |
+          if [ -f evaluation-report.md ]; then
+            cat evaluation-report.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Evaluation did not produce a report." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload evaluation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evaluation-report-${{ steps.target.outputs.sha }}
+          path: evaluation-report.md
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Enforce evaluation result
+        if: steps.eval.outcome != 'success'
+        run: exit 1
