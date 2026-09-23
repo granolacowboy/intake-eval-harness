@@ -3,15 +3,17 @@
 [![CI](https://github.com/granolacowboy/intake-eval-harness/actions/workflows/ci.yml/badge.svg)](https://github.com/granolacowboy/intake-eval-harness/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A small evaluation harness for tool-using MCP servers: run a fixed suite of question/answer tasks against a Model Context Protocol server, let a model use the server's tools to answer, and score each final answer against a golden answer. Extracted from [`intake-triage-mcp`](https://github.com/granolacowboy/intake-triage-mcp), and used to score that server's tools against golden expectations.
+A small evaluation harness for tool-using MCP servers: run a fixed suite against a Model Context Protocol server, score the final answer, and enforce optional deterministic assertions over the tool trace. Extracted from [`intake-triage-mcp`](https://github.com/granolacowboy/intake-triage-mcp), and used to score that server's tools against golden expectations.
 
 ## What it does
 
 - Connects to an MCP server over stdio, SSE, or streamable HTTP (see `connections.py`).
 - Runs each question in a suite through a model (Claude) that must call the server's tools to answer.
 - Captures the tool calls, timing, and the final answer.
-- Scores the final answer against the expected answer by exact string match.
-- Writes a Markdown report (accuracy, per-task pass/fail, tool-call counts, timing) to stdout or a file.
+- Scores answers with deterministic matchers: `exact`, `casefold`, `contains`, or `regex`.
+- Can require or forbid tools, constrain tool order, and cap tool-call count per case.
+- Records ordered tool traces plus model, suite hash, harness revision, server revision, and timestamp.
+- Writes a Markdown evidence report to stdout or a file. Tool inputs are omitted by default to reduce accidental data leakage.
 
 ## Why it exists
 
@@ -31,20 +33,20 @@ examples/
 ## Quick start
 
 ```bash
-pip install -r evals/requirements.txt
+pip install -e .
 export ANTHROPIC_API_KEY=...          # the model that drives the tools
 
 # stdio server, print the report
-python evals/evaluation.py suite.xml -t stdio -c python -a my_server.py
+mcp-eval suite.xml -t stdio -c python -a my_server.py
 
 # HTTP or SSE server, with a header
-python evals/evaluation.py suite.xml -t http -u https://example.com/mcp -H "Authorization: Bearer TOKEN"
+mcp-eval suite.xml -t http -u https://example.com/mcp -H "Authorization: Bearer TOKEN"
 
 # save the report to a file instead of stdout
-python evals/evaluation.py suite.xml -c python -a my_server.py -o report.md
+mcp-eval suite.xml -c python -a my_server.py -o report.md
 
 # full option list
-python evals/evaluation.py --help
+mcp-eval --help
 ```
 
 Pass the suite file first. `-a/--args`, `-e/--env`, and `-H/--header` each accept one or more values, so a suite path placed directly after one of them is read as another value rather than as the positional argument.
@@ -64,7 +66,20 @@ A suite is an XML file of `qa_pair` elements. Each pair is a question the model 
 </evaluation>
 ```
 
-The model is prompted to return its final answer in `<response>` tags; that value is compared to `<answer>` by exact match.
+The model is prompted to return its final answer in `<response>` tags. Existing two-field suites remain valid. Optional constraints make the *path* testable as well as the answer:
+
+```xml
+<qa_pair>
+  <question>Screen the prospective adverse party.</question>
+  <answer match="exact">pending</answer>
+  <required_tools><tool>intake_check_conflicts</tool></required_tools>
+  <forbidden_tools><tool>intake_log_triage</tool></forbidden_tools>
+  <tool_order><tool>intake_check_conflicts</tool></tool_order>
+  <max_tool_calls>2</max_tool_calls>
+</qa_pair>
+```
+
+A task passes only when the answer matcher succeeds and every declared trace constraint passes. `tool_order` is an ordered subsequence, so unrelated calls do not automatically invalidate the case.
 
 ## Testing
 
@@ -79,11 +94,23 @@ GitHub Actions runs those tests on Python 3.10 and 3.12 and verifies that the CL
 
 ## Report
 
-The harness produces a Markdown report: a summary block (accuracy as correct/total and a percentage, average task duration, average and total tool calls) followed by one section per task (question, ground-truth answer, actual answer, pass/fail, duration, tool calls, and the model's own summary and tool feedback).
+The harness produces a Markdown report with provenance and evidence: model identifier, SHA-256 of the suite, harness revision, supplied server revision, UTC timestamp, answer/trace/overall scores, timing, ordered tool trace, and the model's summary and tool feedback.
+
+Use `--server-revision <commit|tag|digest>` whenever the evaluated server has a stable identity. Use `--fail-under 100` only when you intentionally want the model-driven evaluation to become a gate.
 
 ## CI
 
-The bundled CI validates the harness itself; it deliberately does **not** run paid/model-driven evaluations or fail a build on a low evaluation score. Evaluation runs print or write a Markdown report and exit. Wire a chosen score policy into your own release process if you want a threshold to become a gate.
+The default CI validates the harness itself and stays offline. It deliberately does **not** spend model API credits.
+
+A separate **Manual model-driven evaluation** workflow checks out `intake-triage-mcp`, runs the golden suite only when explicitly dispatched, appends the report to the GitHub job summary, and uploads the Markdown report as a retained artifact. It requires an `ANTHROPIC_API_KEY` repository secret and accepts an explicit pass threshold.
+
+## Extending scoring
+
+The deterministic scorer registry is the `SCORERS` mapping in `evals/evaluation.py`. Add a pure `(actual, expected) -> bool` function, register it by name, and add unit tests before exposing it in suite XML. This keeps ordinary evaluation explainable and reproducible. An LLM-as-judge scorer, if added later, should remain explicitly opt-in and should report its judge model and configuration as provenance rather than masquerading as a deterministic gate.
+
+## Releases
+
+The project is installable as `mcp-eval` through `pyproject.toml`. A `v*` tag must match the package version, runs the offline tests, builds wheel/sdist artifacts, and creates or updates the corresponding GitHub Release.
 
 ## Related
 
