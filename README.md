@@ -1,5 +1,8 @@
 # intake-eval-harness
 
+[![CI](https://github.com/granolacowboy/intake-eval-harness/actions/workflows/ci.yml/badge.svg)](https://github.com/granolacowboy/intake-eval-harness/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A small evaluation harness for tool-using MCP servers: run a fixed suite of question/answer tasks against a Model Context Protocol server, let a model use the server's tools to answer, and score each final answer against a golden answer. Extracted from [`intake-triage-mcp`](https://github.com/granolacowboy/intake-triage-mcp), and used to score that server's tools against golden expectations.
 
 ## What it does
@@ -63,13 +66,24 @@ A suite is an XML file of `qa_pair` elements. Each pair is a question the model 
 
 The model is prompted to return its final answer in `<response>` tags; that value is compared to `<answer>` by exact match.
 
+## Testing
+
+The model-driven evaluation itself requires an Anthropic API key, but the harness also has offline unit tests for the deterministic parsing and input-normalization helpers. Those tests do **not** call a model or an MCP server.
+
+```bash
+pip install -r requirements-dev.txt
+pytest -q
+```
+
+GitHub Actions runs those tests on Python 3.10 and 3.12 and verifies that the CLI imports and renders `--help` successfully.
+
 ## Report
 
 The harness produces a Markdown report: a summary block (accuracy as correct/total and a percentage, average task duration, average and total tool calls) followed by one section per task (question, ground-truth answer, actual answer, pass/fail, duration, tool calls, and the model's own summary and tool feedback).
 
 ## CI
 
-There is no bundled workflow, and the harness does not fail your build on a low score: it prints or writes a Markdown report and exits. Run it on demand, or wire it into your own CI or scheduled job and commit or archive the report as the record of a run.
+The bundled CI validates the harness itself; it deliberately does **not** run paid/model-driven evaluations or fail a build on a low evaluation score. Evaluation runs print or write a Markdown report and exit. Wire a chosen score policy into your own release process if you want a threshold to become a gate.
 
 ## Related
 
