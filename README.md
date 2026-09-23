@@ -53,7 +53,7 @@ mcp-eval --help
 
 Pass the suite file first. `-a/--args`, `-e/--env`, and `-H/--header` each accept one or more values, so a suite path placed directly after one of them is read as another value rather than as the positional argument.
 
-Key options: `-t/--transport {stdio,sse,http}` (default `stdio`); `-c/--command`, `-a/--args`, `-e/--env` for stdio; `-u/--url`, `-H/--header` for SSE and HTTP; `-m/--model` (default `claude-3-7-sonnet-20250219`); `-o/--output` (default stdout). The suite file is the positional argument.
+Key options: `-t/--transport {stdio,sse,http}` (default `stdio`); `-c/--command`, `-a/--args`, `-e/--env` for stdio; `-u/--url`, `-H/--header` for SSE and HTTP; `-m/--model` (default `claude-sonnet-4-6`); `-o/--output` (default stdout). The suite file is the positional argument.
 
 ## Suite format
 
