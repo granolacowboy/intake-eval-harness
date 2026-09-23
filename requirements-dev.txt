@@ -1,2 +1,2 @@
--r evals/requirements.txt
+-e .
 pytest>=8.0
