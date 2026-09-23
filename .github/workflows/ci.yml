@@ -28,7 +28,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
           cache-dependency-path: |
-            evals/requirements.txt
+            pyproject.toml
             requirements-dev.txt
 
       - name: Install dependencies
@@ -38,4 +38,4 @@ jobs:
         run: python -m pytest -q
 
       - name: CLI smoke test
-        run: python evals/evaluation.py --help
+        run: mcp-eval --help
