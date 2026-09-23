@@ -1,22 +1,33 @@
-"""MCP Server Evaluation Harness
+"""MCP Server Evaluation Harness.
 
-This script evaluates MCP servers by running test questions against them using Claude.
+Runs a fixed suite against an MCP server with Claude, scores the final answer,
+and optionally enforces deterministic constraints over the observed tool trace.
 """
+
+from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
+import os
 import re
+import subprocess
 import sys
 import time
 import traceback
 import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from anthropic import Anthropic
 
-from connections import create_connection
+try:
+    from .connections import create_connection
+except ImportError:
+    from connections import create_connection
+
 
 EVALUATION_PROMPT = """You are an AI assistant with access to tools.
 
@@ -39,9 +50,8 @@ Feedback Requirements:
   - Comment on tool names: Are they clear and descriptive?
   - Comment on input parameters: Are they well-documented? Are required vs optional parameters clear?
   - Comment on descriptions: Do they accurately describe what the tool does?
-  - Comment on any errors encountered during tool usage: Did the tool fail to execute? Did the tool return too many tokens?
+  - Comment on any errors encountered during tool usage
   - Identify specific areas for improvement and explain WHY they would help
-  - Be specific and actionable in your suggestions
 
 Response Requirements:
 - Your response should be concise and directly address what was asked
@@ -53,34 +63,138 @@ Response Requirements:
 - Your response should go last"""
 
 
+def _child_texts(parent: ET.Element, path: str) -> list[str]:
+    return [(elem.text or "").strip() for elem in parent.findall(path) if (elem.text or "").strip()]
+
+
+def _exact(actual: str, expected: str) -> bool:
+    return actual == expected
+
+
+def _casefold(actual: str, expected: str) -> bool:
+    return actual.casefold() == expected.casefold()
+
+
+def _contains(actual: str, expected: str) -> bool:
+    return expected in actual
+
+
+def _regex(actual: str, expected: str) -> bool:
+    return re.fullmatch(expected, actual) is not None
+
+
+SCORERS: dict[str, Callable[[str, str], bool]] = {
+    "exact": _exact,
+    "casefold": _casefold,
+    "contains": _contains,
+    "regex": _regex,
+}
+
+
 def parse_evaluation_file(file_path: Path) -> list[dict[str, Any]]:
-    """Parse XML evaluation file with qa_pair elements."""
+    """Parse an XML suite. Two-field question/answer suites remain valid."""
     try:
         tree = ET.parse(file_path)
         root = tree.getroot()
-        evaluations = []
+        evaluations: list[dict[str, Any]] = []
 
         for qa_pair in root.findall(".//qa_pair"):
             question_elem = qa_pair.find("question")
             answer_elem = qa_pair.find("answer")
+            if question_elem is None or answer_elem is None:
+                continue
 
-            if question_elem is not None and answer_elem is not None:
-                evaluations.append({
-                    "question": (question_elem.text or "").strip(),
-                    "answer": (answer_elem.text or "").strip(),
-                })
+            max_calls_elem = qa_pair.find("max_tool_calls")
+            max_tool_calls = None
+            if max_calls_elem is not None and (max_calls_elem.text or "").strip():
+                max_tool_calls = int((max_calls_elem.text or "").strip())
+                if max_tool_calls < 0:
+                    raise ValueError("max_tool_calls must be >= 0")
+
+            match_mode = answer_elem.attrib.get("match", "exact").strip().lower()
+            if match_mode not in SCORERS:
+                raise ValueError(
+                    f"unknown answer matcher {match_mode!r}; expected one of {', '.join(sorted(SCORERS))}"
+                )
+
+            evaluations.append({
+                "question": (question_elem.text or "").strip(),
+                "answer": (answer_elem.text or "").strip(),
+                "answer_match": match_mode,
+                "required_tools": _child_texts(qa_pair, "./required_tools/tool"),
+                "forbidden_tools": _child_texts(qa_pair, "./forbidden_tools/tool"),
+                "tool_order": _child_texts(qa_pair, "./tool_order/tool"),
+                "max_tool_calls": max_tool_calls,
+            })
 
         return evaluations
-    except Exception as e:
-        print(f"Error parsing evaluation file {file_path}: {e}")
+    except Exception as exc:
+        print(f"Error parsing evaluation file {file_path}: {exc}")
         return []
 
 
-def extract_xml_content(text: str, tag: str) -> str | None:
-    """Extract content from XML tags."""
+def extract_xml_content(text: str | None, tag: str) -> str | None:
+    if not text:
+        return None
     pattern = rf"<{tag}>(.*?)</{tag}>"
     matches = re.findall(pattern, text, re.DOTALL)
     return matches[-1].strip() if matches else None
+
+
+def score_answer(actual: str | None, expected: str, mode: str = "exact") -> bool:
+    if actual is None:
+        return False
+    try:
+        scorer = SCORERS[mode]
+    except KeyError as exc:
+        raise ValueError(f"Unknown scorer: {mode}") from exc
+    return scorer(actual, expected)
+
+
+def evaluate_trace_constraints(
+    qa_pair: dict[str, Any], tool_trace: list[dict[str, Any]]
+) -> list[str]:
+    names = [event["name"] for event in tool_trace]
+    violations: list[str] = []
+
+    for required in qa_pair.get("required_tools", []):
+        if required not in names:
+            violations.append(f"required tool not called: {required}")
+
+    for forbidden in qa_pair.get("forbidden_tools", []):
+        if forbidden in names:
+            violations.append(f"forbidden tool called: {forbidden}")
+
+    expected_order = qa_pair.get("tool_order", [])
+    if expected_order:
+        cursor = 0
+        for name in names:
+            if cursor < len(expected_order) and name == expected_order[cursor]:
+                cursor += 1
+        if cursor != len(expected_order):
+            violations.append("required tool order not observed: " + " -> ".join(expected_order))
+
+    max_tool_calls = qa_pair.get("max_tool_calls")
+    if max_tool_calls is not None and len(names) > max_tool_calls:
+        violations.append(f"tool-call limit exceeded: {len(names)} > {max_tool_calls}")
+
+    return violations
+
+
+def _public_trace(tool_trace: list[dict[str, Any]], include_inputs: bool) -> list[dict[str, Any]]:
+    public: list[dict[str, Any]] = []
+    for event in tool_trace:
+        item = {
+            "name": event["name"],
+            "duration_s": round(event["duration_s"], 4),
+            "ok": event["ok"],
+        }
+        if include_inputs:
+            item["input"] = event["input"]
+        if event.get("error"):
+            item["error"] = event["error"]
+        public.append(item)
+    return public
 
 
 async def agent_loop(
@@ -89,9 +203,9 @@ async def agent_loop(
     question: str,
     tools: list[dict[str, Any]],
     connection: Any,
-) -> tuple[str, dict[str, Any]]:
-    """Run the agent loop with MCP tools."""
-    messages = [{"role": "user", "content": question}]
+) -> tuple[str | None, list[dict[str, Any]]]:
+    messages: list[dict[str, Any]] = [{"role": "user", "content": question}]
+    tool_trace: list[dict[str, Any]] = []
 
     response = await asyncio.to_thread(
         client.messages.create,
@@ -101,39 +215,40 @@ async def agent_loop(
         messages=messages,
         tools=tools,
     )
-
     messages.append({"role": "assistant", "content": response.content})
 
-    tool_metrics = {}
-
     while response.stop_reason == "tool_use":
-        tool_use = next(block for block in response.content if block.type == "tool_use")
-        tool_name = tool_use.name
-        tool_input = tool_use.input
+        tool_blocks = [block for block in response.content if block.type == "tool_use"]
+        if not tool_blocks:
+            break
 
-        tool_start_ts = time.time()
-        try:
-            tool_result = await connection.call_tool(tool_name, tool_input)
-            tool_response = json.dumps(tool_result) if isinstance(tool_result, (dict, list)) else str(tool_result)
-        except Exception as e:
-            tool_response = f"Error executing tool {tool_name}: {str(e)}\n"
-            tool_response += traceback.format_exc()
-        tool_duration = time.time() - tool_start_ts
+        tool_results: list[dict[str, Any]] = []
+        for tool_use in tool_blocks:
+            tool_start_ts = time.time()
+            ok = True
+            error = None
+            try:
+                tool_result = await connection.call_tool(tool_use.name, tool_use.input)
+                tool_response = json.dumps(tool_result) if isinstance(tool_result, (dict, list)) else str(tool_result)
+            except Exception as exc:
+                ok = False
+                error = str(exc)
+                tool_response = f"Error executing tool {tool_use.name}: {exc}\n" + traceback.format_exc()
 
-        if tool_name not in tool_metrics:
-            tool_metrics[tool_name] = {"count": 0, "durations": []}
-        tool_metrics[tool_name]["count"] += 1
-        tool_metrics[tool_name]["durations"].append(tool_duration)
-
-        messages.append({
-            "role": "user",
-            "content": [{
+            tool_trace.append({
+                "name": tool_use.name,
+                "input": tool_use.input,
+                "duration_s": time.time() - tool_start_ts,
+                "ok": ok,
+                "error": error,
+            })
+            tool_results.append({
                 "type": "tool_result",
                 "tool_use_id": tool_use.id,
                 "content": tool_response,
-            }]
-        })
+            })
 
+        messages.append({"role": "user", "content": tool_results})
         response = await asyncio.to_thread(
             client.messages.create,
             model=model,
@@ -144,11 +259,8 @@ async def agent_loop(
         )
         messages.append({"role": "assistant", "content": response.content})
 
-    response_text = next(
-        (block.text for block in response.content if hasattr(block, "text")),
-        None,
-    )
-    return response_text, tool_metrics
+    response_text = "\n".join(block.text for block in response.content if hasattr(block, "text")) or None
+    return response_text, tool_trace
 
 
 async def evaluate_single_task(
@@ -158,41 +270,72 @@ async def evaluate_single_task(
     tools: list[dict[str, Any]],
     connection: Any,
     task_index: int,
+    include_tool_inputs: bool = False,
 ) -> dict[str, Any]:
-    """Evaluate a single QA pair with the given tools."""
     start_time = time.time()
-
-    print(f"Task {task_index + 1}: Running task with question: {qa_pair['question']}")
-    response, tool_metrics = await agent_loop(client, model, qa_pair["question"], tools, connection)
+    print(f"Task {task_index + 1}: {qa_pair['question']}")
+    response, tool_trace = await agent_loop(client, model, qa_pair["question"], tools, connection)
 
     response_value = extract_xml_content(response, "response")
     summary = extract_xml_content(response, "summary")
     feedback = extract_xml_content(response, "feedback")
-
-    duration_seconds = time.time() - start_time
+    answer_correct = score_answer(response_value, qa_pair["answer"], qa_pair.get("answer_match", "exact"))
+    trace_violations = evaluate_trace_constraints(qa_pair, tool_trace)
+    trace_valid = not trace_violations
 
     return {
         "question": qa_pair["question"],
         "expected": qa_pair["answer"],
         "actual": response_value,
-        "score": int(response_value == qa_pair["answer"]) if response_value else 0,
-        "total_duration": duration_seconds,
-        "tool_calls": tool_metrics,
-        "num_tool_calls": sum(len(metrics["durations"]) for metrics in tool_metrics.values()),
+        "answer_match": qa_pair.get("answer_match", "exact"),
+        "answer_correct": answer_correct,
+        "trace_valid": trace_valid,
+        "trace_violations": trace_violations,
+        "score": int(answer_correct and trace_valid),
+        "total_duration": time.time() - start_time,
+        "tool_trace": _public_trace(tool_trace, include_tool_inputs),
+        "num_tool_calls": len(tool_trace),
         "summary": summary,
         "feedback": feedback,
     }
 
 
+def detect_harness_revision() -> str:
+    if os.getenv("GITHUB_SHA"):
+        return os.environ["GITHUB_SHA"]
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+
+
 REPORT_HEADER = """
 # Evaluation Report
 
+## Provenance
+
+- **Generated (UTC)**: {generated_at}
+- **Model**: `{model}`
+- **Suite SHA-256**: `{suite_sha256}`
+- **Harness revision**: `{harness_revision}`
+- **Server revision**: `{server_revision}`
+- **Run label**: {run_label}
+
 ## Summary
 
-- **Accuracy**: {correct}/{total} ({accuracy:.1f}%)
+- **Passing tasks**: {correct}/{total} ({accuracy:.1f}%)
+- **Answer-correct tasks**: {answer_correct}/{total}
+- **Trace-valid tasks**: {trace_valid}/{total}
 - **Average Task Duration**: {average_duration_s:.2f}s
 - **Average Tool Calls per Task**: {average_tool_calls:.2f}
 - **Total Tool Calls**: {total_tool_calls}
+
+A task passes only when its answer matcher succeeds **and** every configured
+tool-trace constraint is satisfied.
 
 ---
 """
@@ -202,10 +345,18 @@ TASK_TEMPLATE = """
 
 **Question**: {question}
 **Ground Truth Answer**: `{expected_answer}`
+**Answer Matcher**: `{answer_match}`
 **Actual Answer**: `{actual_answer}`
-**Correct**: {correct_indicator}
+**Answer Correct**: {answer_correct_indicator}
+**Trace Valid**: {trace_valid_indicator}
+**Overall Pass**: {correct_indicator}
+**Trace Violations**: {trace_violations}
 **Duration**: {total_duration:.2f}s
-**Tool Calls**: {tool_calls}
+**Tool Trace**:
+
+```json
+{tool_trace}
+```
 
 **Summary**
 {summary}
@@ -221,63 +372,86 @@ async def run_evaluation(
     eval_path: Path,
     connection: Any,
     model: str = "claude-3-7-sonnet-20250219",
-) -> str:
-    """Run evaluation with MCP server tools."""
+    *,
+    server_revision: str = "unknown",
+    run_label: str = "unspecified",
+    include_tool_inputs: bool = False,
+) -> tuple[str, dict[str, Any]]:
     print("🚀 Starting Evaluation")
-
     client = Anthropic()
-
     tools = await connection.list_tools()
     print(f"📋 Loaded {len(tools)} tools from MCP server")
 
     qa_pairs = parse_evaluation_file(eval_path)
+    if not qa_pairs:
+        raise ValueError("evaluation suite contains no valid qa_pair entries")
     print(f"📋 Loaded {len(qa_pairs)} evaluation tasks")
 
     results = []
     for i, qa_pair in enumerate(qa_pairs):
         print(f"Processing task {i + 1}/{len(qa_pairs)}")
-        result = await evaluate_single_task(client, model, qa_pair, tools, connection, i)
-        results.append(result)
+        results.append(await evaluate_single_task(
+            client, model, qa_pair, tools, connection, i,
+            include_tool_inputs=include_tool_inputs,
+        ))
 
     correct = sum(r["score"] for r in results)
-    accuracy = (correct / len(results)) * 100 if results else 0
-    average_duration_s = sum(r["total_duration"] for r in results) / len(results) if results else 0
-    average_tool_calls = sum(r["num_tool_calls"] for r in results) / len(results) if results else 0
+    answer_correct = sum(int(r["answer_correct"]) for r in results)
+    trace_valid = sum(int(r["trace_valid"]) for r in results)
+    accuracy = (correct / len(results)) * 100
+    average_duration_s = sum(r["total_duration"] for r in results) / len(results)
+    average_tool_calls = sum(r["num_tool_calls"] for r in results) / len(results)
     total_tool_calls = sum(r["num_tool_calls"] for r in results)
 
     report = REPORT_HEADER.format(
+        generated_at=datetime.now(timezone.utc).isoformat(),
+        model=model,
+        suite_sha256=hashlib.sha256(eval_path.read_bytes()).hexdigest(),
+        harness_revision=detect_harness_revision(),
+        server_revision=server_revision,
+        run_label=run_label,
         correct=correct,
         total=len(results),
         accuracy=accuracy,
+        answer_correct=answer_correct,
+        trace_valid=trace_valid,
         average_duration_s=average_duration_s,
         average_tool_calls=average_tool_calls,
         total_tool_calls=total_tool_calls,
     )
 
-    report += "".join([
+    report += "".join(
         TASK_TEMPLATE.format(
             task_num=i + 1,
             question=qa_pair["question"],
             expected_answer=qa_pair["answer"],
+            answer_match=result["answer_match"],
             actual_answer=result["actual"] or "N/A",
+            answer_correct_indicator="✅" if result["answer_correct"] else "❌",
+            trace_valid_indicator="✅" if result["trace_valid"] else "❌",
             correct_indicator="✅" if result["score"] else "❌",
+            trace_violations="; ".join(result["trace_violations"]) if result["trace_violations"] else "None",
             total_duration=result["total_duration"],
-            tool_calls=json.dumps(result["tool_calls"], indent=2),
+            tool_trace=json.dumps(result["tool_trace"], indent=2),
             summary=result["summary"] or "N/A",
             feedback=result["feedback"] or "N/A",
         )
         for i, (qa_pair, result) in enumerate(zip(qa_pairs, results))
-    ])
+    )
 
-    return report
+    return report, {
+        "passing": correct,
+        "total": len(results),
+        "accuracy": accuracy,
+        "answer_correct": answer_correct,
+        "trace_valid": trace_valid,
+    }
 
 
-def parse_headers(header_list: list[str]) -> dict[str, str]:
-    """Parse header strings in format 'Key: Value' into a dictionary."""
+def parse_headers(header_list: list[str] | None) -> dict[str, str]:
     headers = {}
     if not header_list:
         return headers
-
     for header in header_list:
         if ":" in header:
             key, value = header.split(":", 1)
@@ -287,12 +461,10 @@ def parse_headers(header_list: list[str]) -> dict[str, str]:
     return headers
 
 
-def parse_env_vars(env_list: list[str]) -> dict[str, str]:
-    """Parse environment variable strings in format 'KEY=VALUE' into a dictionary."""
+def parse_env_vars(env_list: list[str] | None) -> dict[str, str]:
     env = {}
     if not env_list:
         return env
-
     for env_var in env_list:
         if "=" in env_var:
             key, value = env_var.split("=", 1)
@@ -302,72 +474,83 @@ def parse_env_vars(env_list: list[str]) -> dict[str, str]:
     return env
 
 
-async def main():
+async def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Evaluate MCP servers using test questions",
+        description="Evaluate MCP servers with answer and tool-trace assertions",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Evaluate a local stdio MCP server
-  python evaluation.py -t stdio -c python -a my_server.py eval.xml
-
-  # Evaluate an SSE MCP server
-  python evaluation.py -t sse -u https://example.com/mcp -H "Authorization: Bearer token" eval.xml
-
-  # Evaluate an HTTP MCP server with custom model
-  python evaluation.py -t http -u https://example.com/mcp -m claude-3-5-sonnet-20241022 eval.xml
-        """,
     )
-
     parser.add_argument("eval_file", type=Path, help="Path to evaluation XML file")
-    parser.add_argument("-t", "--transport", choices=["stdio", "sse", "http"], default="stdio", help="Transport type (default: stdio)")
-    parser.add_argument("-m", "--model", default="claude-3-7-sonnet-20250219", help="Claude model to use (default: claude-3-7-sonnet-20250219)")
+    parser.add_argument("-t", "--transport", choices=["stdio", "sse", "http"], default="stdio")
+    parser.add_argument("-m", "--model", default="claude-3-7-sonnet-20250219", help="Claude model identifier")
 
     stdio_group = parser.add_argument_group("stdio options")
-    stdio_group.add_argument("-c", "--command", help="Command to run MCP server (stdio only)")
-    stdio_group.add_argument("-a", "--args", nargs="+", help="Arguments for the command (stdio only)")
-    stdio_group.add_argument("-e", "--env", nargs="+", help="Environment variables in KEY=VALUE format (stdio only)")
+    stdio_group.add_argument("-c", "--command", help="Command to run MCP server")
+    stdio_group.add_argument("-a", "--args", nargs="+", help="Arguments for the command")
+    stdio_group.add_argument("-e", "--env", nargs="+", help="Environment variables in KEY=VALUE format")
 
     remote_group = parser.add_argument_group("sse/http options")
-    remote_group.add_argument("-u", "--url", help="MCP server URL (sse/http only)")
-    remote_group.add_argument("-H", "--header", nargs="+", dest="headers", help="HTTP headers in 'Key: Value' format (sse/http only)")
+    remote_group.add_argument("-u", "--url", help="MCP server URL")
+    remote_group.add_argument("-H", "--header", nargs="+", dest="headers", help="HTTP headers in 'Key: Value' format")
 
-    parser.add_argument("-o", "--output", type=Path, help="Output file for evaluation report (default: stdout)")
+    parser.add_argument("-o", "--output", type=Path, help="Output Markdown report")
+    parser.add_argument("--server-revision", default="unknown", help="Commit/tag/digest of evaluated server")
+    parser.add_argument("--run-label", default="unspecified", help="Human-readable experiment label")
+    parser.add_argument("--include-tool-inputs", action="store_true", help="Include tool inputs in report")
+    parser.add_argument("--fail-under", type=float, metavar="PERCENT", help="Fail if overall pass percentage is lower")
 
     args = parser.parse_args()
 
     if not args.eval_file.exists():
         print(f"Error: Evaluation file not found: {args.eval_file}")
-        sys.exit(1)
-
-    headers = parse_headers(args.headers) if args.headers else None
-    env_vars = parse_env_vars(args.env) if args.env else None
+        return 1
+    if args.fail_under is not None and not 0 <= args.fail_under <= 100:
+        print("Error: --fail-under must be between 0 and 100")
+        return 2
 
     try:
         connection = create_connection(
             transport=args.transport,
             command=args.command,
             args=args.args,
-            env=env_vars,
+            env=parse_env_vars(args.env) or None,
             url=args.url,
-            headers=headers,
+            headers=parse_headers(args.headers) or None,
         )
-    except ValueError as e:
-        print(f"Error: {e}")
-        sys.exit(1)
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        return 1
 
     print(f"🔗 Connecting to MCP server via {args.transport}...")
-
     async with connection:
         print("✅ Connected successfully")
-        report = await run_evaluation(args.eval_file, connection, args.model)
+        try:
+            report, metrics = await run_evaluation(
+                args.eval_file,
+                connection,
+                args.model,
+                server_revision=args.server_revision,
+                run_label=args.run_label,
+                include_tool_inputs=args.include_tool_inputs,
+            )
+        except ValueError as exc:
+            print(f"Error: {exc}")
+            return 1
 
-        if args.output:
-            args.output.write_text(report)
-            print(f"\n✅ Report saved to {args.output}")
-        else:
-            print("\n" + report)
+    if args.output:
+        args.output.write_text(report, encoding="utf-8")
+        print(f"\n✅ Report saved to {args.output}")
+    else:
+        print("\n" + report)
+
+    if args.fail_under is not None and metrics["accuracy"] < args.fail_under:
+        print(f"❌ Quality gate failed: {metrics['accuracy']:.1f}% < {args.fail_under:.1f}%")
+        return 3
+    return 0
+
+
+def cli() -> None:
+    raise SystemExit(asyncio.run(main()))
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    cli()
