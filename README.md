@@ -15,6 +15,8 @@ A small evaluation harness for tool-using MCP servers: run a fixed suite against
 - Records ordered tool traces plus model, suite hash, harness revision, server revision, and timestamp.
 - Writes a Markdown evidence report to stdout or a file. Tool inputs are omitted by default to reduce accidental data leakage.
 
+> **Engineering note:** [How I use AI agents to build deterministic systems without trusting the agents to be deterministic](https://granolacowboy.dev/writing/post-4-deterministic-ai) explains why this harness treats execution behavior as part of correctness.
+
 ## Why it exists
 
 Tool-using systems fail in ways a unit test does not catch: the model picks the wrong tool, skips a required step, or answers without calling anything. Running a fixed suite through the real server turns those failures into a repeatable number, so a change to your server, tools, or prompt shows up as a drop in the score instead of a surprise in production.
