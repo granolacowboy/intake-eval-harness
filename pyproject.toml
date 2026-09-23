@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcp-eval-harness"
+version = "0.1.0"
+description = "Deterministic answer and tool-trace evaluation for MCP servers"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Rich Berman" }]
+dependencies = [
+  "anthropic>=0.39.0",
+  "mcp>=1.8.0,<2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+mcp-eval = "evals.evaluation:cli"
+
+[project.urls]
+Homepage = "https://github.com/granolacowboy/intake-eval-harness"
+Repository = "https://github.com/granolacowboy/intake-eval-harness"
+Issues = "https://github.com/granolacowboy/intake-eval-harness/issues"
+
+[tool.setuptools]
+packages = ["evals"]
