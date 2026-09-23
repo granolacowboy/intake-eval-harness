@@ -10,7 +10,7 @@ on:
       model:
         description: "Anthropic model identifier"
         required: true
-        default: "claude-3-7-sonnet-20250219"
+        default: "claude-sonnet-4-6"
       fail_under:
         description: "Required overall pass percentage"
         required: true
@@ -66,7 +66,15 @@ jobs:
         id: eval
         continue-on-error: true
         run: |
-          mcp-eval examples/intake-triage/evaluation.xml             -t stdio             -c python             -a target-server/server.py             -m "${{ inputs.model }}"             --server-revision "${{ steps.target.outputs.sha }}"             --run-label "github-actions/manual"             --fail-under "${{ inputs.fail_under }}"             -o evaluation-report.md
+          mcp-eval examples/intake-triage/evaluation.xml \
+            -t stdio \
+            -c python \
+            -a target-server/server.py \
+            -m "${{ inputs.model }}" \
+            --server-revision "${{ steps.target.outputs.sha }}" \
+            --run-label "github-actions/manual" \
+            --fail-under "${{ inputs.fail_under }}" \
+            -o evaluation-report.md
 
       - name: Publish report to job summary
         if: always()
