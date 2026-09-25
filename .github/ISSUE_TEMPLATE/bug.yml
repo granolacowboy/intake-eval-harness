@@ -1,0 +1,31 @@
+name: Evaluator bug
+description: Report a deterministic parser, scorer, reporter, or trace-assertion defect
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: suite
+    attributes:
+      label: Minimal suite/input
+      description: Provide the smallest fictional XML or evidence fragment that reproduces the issue.
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: provenance
+    attributes:
+      label: Provenance
+      description: Harness commit/version, Python version, and transport. Do not include credentials or private tool data.
+    validations:
+      required: true
