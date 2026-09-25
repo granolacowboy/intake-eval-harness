@@ -74,6 +74,8 @@ jobs:
             --server-revision "${{ steps.target.outputs.sha }}" \
             --run-label "github-actions/manual" \
             --fail-under "${{ inputs.fail_under }}" \
+            --json-output evaluation-evidence.json \
+            --junit-output evaluation-junit.xml \
             -o evaluation-report.md
 
       - name: Publish report to job summary
