@@ -93,7 +93,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: evaluation-report-${{ steps.target.outputs.sha }}
-          path: evaluation-report.md
+          path: |
+            evaluation-report.md
+            evaluation-evidence.json
+            evaluation-junit.xml
           if-no-files-found: warn
           retention-days: 30
 
