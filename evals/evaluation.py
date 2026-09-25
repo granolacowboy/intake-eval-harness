@@ -235,18 +235,42 @@ async def agent_loop(
     question: str,
     tools: list[dict[str, Any]],
     connection: Any,
-) -> tuple[str | None, list[dict[str, Any]]]:
+    *,
+    max_model_turns: int = 4,
+    max_output_tokens: int = 4096,
+) -> tuple[str | None, list[dict[str, Any]], str | None, dict[str, int]]:
     messages: list[dict[str, Any]] = [{"role": "user", "content": question}]
     tool_trace: list[dict[str, Any]] = []
+    model_usage = {
+        "calls": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+    }
+
+    def record_usage(response: Any) -> None:
+        model_usage["calls"] += 1
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return
+        for field in (
+            "input_tokens",
+            "output_tokens",
+            "cache_creation_input_tokens",
+            "cache_read_input_tokens",
+        ):
+            model_usage[field] += int(getattr(usage, field, 0) or 0)
 
     response = await asyncio.to_thread(
         client.messages.create,
         model=model,
-        max_tokens=4096,
+        max_tokens=max_output_tokens,
         system=EVALUATION_PROMPT,
         messages=messages,
         tools=tools,
     )
+    record_usage(response)
     messages.append({"role": "assistant", "content": response.content})
 
     while response.stop_reason == "tool_use":
@@ -282,18 +306,30 @@ async def agent_loop(
             })
 
         messages.append({"role": "user", "content": tool_results})
+        if model_usage["calls"] >= max_model_turns:
+            return (
+                None,
+                tool_trace,
+                (
+                    f"model turn limit reached ({max_model_turns}); "
+                    "evaluation stopped before another billable model call"
+                ),
+                model_usage,
+            )
+
         response = await asyncio.to_thread(
             client.messages.create,
             model=model,
-            max_tokens=4096,
+            max_tokens=max_output_tokens,
             system=EVALUATION_PROMPT,
             messages=messages,
             tools=tools,
         )
+        record_usage(response)
         messages.append({"role": "assistant", "content": response.content})
 
     response_text = "\n".join(block.text for block in response.content if hasattr(block, "text")) or None
-    return response_text, tool_trace
+    return response_text, tool_trace, None, model_usage
 
 
 async def evaluate_single_task(
@@ -305,10 +341,20 @@ async def evaluate_single_task(
     task_index: int,
     include_tool_inputs: bool = False,
     include_tool_results: bool = False,
+    max_model_turns: int = 4,
+    max_output_tokens: int = 4096,
 ) -> dict[str, Any]:
     start_time = time.time()
     print(f"Task {task_index + 1}: {qa_pair['question']}")
-    response, tool_trace = await agent_loop(client, model, qa_pair["question"], tools, connection)
+    response, tool_trace, model_limit_violation, model_usage = await agent_loop(
+        client,
+        model,
+        qa_pair["question"],
+        tools,
+        connection,
+        max_model_turns=max_model_turns,
+        max_output_tokens=max_output_tokens,
+    )
 
     response_value = extract_xml_content(response, "response")
     summary = extract_xml_content(response, "summary")
@@ -319,6 +365,8 @@ async def evaluate_single_task(
     trace_violations.extend(
         evaluate_extended_constraints(qa_pair, tool_trace, total_duration)
     )
+    if model_limit_violation:
+        trace_violations.append(model_limit_violation)
     trace_valid = not trace_violations
 
     return {
@@ -336,6 +384,7 @@ async def evaluate_single_task(
             tool_trace, include_tool_inputs, include_tool_results
         ),
         "num_tool_calls": len(tool_trace),
+        "model_usage": model_usage,
         "summary": summary,
         "feedback": feedback,
     }
@@ -365,6 +414,8 @@ REPORT_HEADER = """
 - **Harness revision**: `{harness_revision}`
 - **Server revision**: `{server_revision}`
 - **Run label**: {run_label}
+- **Max model turns per task**: {max_model_turns}
+- **Max output tokens per model call**: {max_output_tokens}
 
 ## Summary
 
@@ -374,6 +425,9 @@ REPORT_HEADER = """
 - **Average Task Duration**: {average_duration_s:.2f}s
 - **Average Tool Calls per Task**: {average_tool_calls:.2f}
 - **Total Tool Calls**: {total_tool_calls}
+- **Total Model Calls**: {total_model_calls}
+- **Input Tokens**: {total_input_tokens}
+- **Output Tokens**: {total_output_tokens}
 
 A task passes only when its answer matcher succeeds **and** every configured
 tool-trace constraint is satisfied.
@@ -418,6 +472,8 @@ async def run_evaluation(
     run_label: str = "unspecified",
     include_tool_inputs: bool = False,
     include_tool_results: bool = False,
+    max_model_turns: int = 4,
+    max_output_tokens: int = 4096,
 ) -> tuple[str, dict[str, Any], dict[str, Any]]:
     print("🚀 Starting Evaluation")
     client = Anthropic()
@@ -436,6 +492,8 @@ async def run_evaluation(
             client, model, qa_pair, tools, connection, i,
             include_tool_inputs=include_tool_inputs,
             include_tool_results=include_tool_results,
+            max_model_turns=max_model_turns,
+            max_output_tokens=max_output_tokens,
         ))
 
     generated_at = datetime.now(timezone.utc).isoformat()
@@ -449,6 +507,15 @@ async def run_evaluation(
     average_duration_s = sum(r["total_duration"] for r in results) / len(results)
     average_tool_calls = sum(r["num_tool_calls"] for r in results) / len(results)
     total_tool_calls = sum(r["num_tool_calls"] for r in results)
+    total_model_calls = sum(r["model_usage"]["calls"] for r in results)
+    total_input_tokens = sum(r["model_usage"]["input_tokens"] for r in results)
+    total_output_tokens = sum(r["model_usage"]["output_tokens"] for r in results)
+    total_cache_creation_input_tokens = sum(
+        r["model_usage"]["cache_creation_input_tokens"] for r in results
+    )
+    total_cache_read_input_tokens = sum(
+        r["model_usage"]["cache_read_input_tokens"] for r in results
+    )
 
     report = REPORT_HEADER.format(
         generated_at=generated_at,
@@ -465,6 +532,11 @@ async def run_evaluation(
         average_duration_s=average_duration_s,
         average_tool_calls=average_tool_calls,
         total_tool_calls=total_tool_calls,
+        total_model_calls=total_model_calls,
+        total_input_tokens=total_input_tokens,
+        total_output_tokens=total_output_tokens,
+        max_model_turns=max_model_turns,
+        max_output_tokens=max_output_tokens,
     )
 
     report += "".join(
@@ -495,6 +567,11 @@ async def run_evaluation(
         "average_duration_s": average_duration_s,
         "average_tool_calls": average_tool_calls,
         "total_tool_calls": total_tool_calls,
+        "total_model_calls": total_model_calls,
+        "total_input_tokens": total_input_tokens,
+        "total_output_tokens": total_output_tokens,
+        "total_cache_creation_input_tokens": total_cache_creation_input_tokens,
+        "total_cache_read_input_tokens": total_cache_read_input_tokens,
     }
     evidence = {
         "schema_version": "1.0",
@@ -505,6 +582,8 @@ async def run_evaluation(
             "harness_revision": harness_revision,
             "server_revision": server_revision,
             "run_label": run_label,
+            "max_model_turns": max_model_turns,
+            "max_output_tokens": max_output_tokens,
         },
         "summary": metrics,
         "results": results,
@@ -566,6 +645,18 @@ async def main() -> int:
     parser.add_argument("--baseline", type=Path, help="Compare against a prior JSON evidence file")
     parser.add_argument("--fail-on-regression", action="store_true", help="Fail if accuracy or trace-valid count regresses from --baseline")
     parser.add_argument("--fail-under", type=float, metavar="PERCENT", help="Fail if overall pass percentage is lower")
+    parser.add_argument(
+        "--max-model-turns",
+        type=int,
+        default=4,
+        help="Maximum billable model calls per task before failing closed (default: 4)",
+    )
+    parser.add_argument(
+        "--max-output-tokens",
+        type=int,
+        default=4096,
+        help="Maximum output tokens requested from each model call (default: 4096)",
+    )
 
     args = parser.parse_args()
 
@@ -580,6 +671,12 @@ async def main() -> int:
         return 2
     if args.baseline is not None and not args.baseline.exists():
         print(f"Error: baseline evidence not found: {args.baseline}")
+        return 2
+    if args.max_model_turns < 1:
+        print("Error: --max-model-turns must be at least 1")
+        return 2
+    if args.max_output_tokens < 1:
+        print("Error: --max-output-tokens must be at least 1")
         return 2
 
     try:
@@ -607,6 +704,8 @@ async def main() -> int:
                 run_label=args.run_label,
                 include_tool_inputs=args.include_tool_inputs,
                 include_tool_results=args.include_tool_results,
+                max_model_turns=args.max_model_turns,
+                max_output_tokens=args.max_output_tokens,
             )
         except ValueError as exc:
             print(f"Error: {exc}")
