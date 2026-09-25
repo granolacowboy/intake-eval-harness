@@ -89,7 +89,7 @@ The model is prompted to return its final answer in `<response>` tags. Existing 
     </call>
   </required_calls>
   <result_assertions>
-    <contains tool="intake_log_triage">conflicts gate</contains>
+    <contains tool="intake_check_conflicts">pending</contains>
   </result_assertions>
 </qa_pair>
 ```
