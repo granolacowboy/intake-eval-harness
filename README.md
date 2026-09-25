@@ -56,7 +56,7 @@ mcp-eval --help
 
 Pass the suite file first. `-a/--args`, `-e/--env`, and `-H/--header` each accept one or more values, so a suite path placed directly after one of them is read as another value rather than as the positional argument.
 
-Key options: `-t/--transport {stdio,sse,http}` (default `stdio`); `-c/--command`, `-a/--args`, `-e/--env` for stdio; `-u/--url`, `-H/--header` for SSE and HTTP; `-m/--model` (default `claude-sonnet-4-6`); `-o/--output` (default stdout); `--max-model-turns` (default `4`) fails closed before another billable model call; `--max-output-tokens` (default `4096`) caps requested output per model call. The suite file is the positional argument.
+Key options: `-t/--transport {stdio,sse,http}` (default `stdio`); `-c/--command`, `-a/--args`, `-e/--env` for stdio; `-u/--url`, `-H/--header` for SSE and HTTP; `-m/--model` (default `claude-sonnet-4-6`); `-o/--output` (default stdout); `--max-model-turns` (default `4`) fails closed before another billable model call; `--max-input-tokens` optionally preflights every model turn through Anthropic's token-counting endpoint and refuses generation if the input exceeds the cap; `--max-output-tokens` (default `4096`) caps requested output per model call. The suite file is the positional argument.
 
 ## Suite format
 
@@ -133,7 +133,7 @@ The baseline gate intentionally checks the aggregate pass percentage and trace-v
 
 The central portfolio verifier validates the harness itself and stays offline. It deliberately does **not** spend model API credits.
 
-Model-driven evaluation is intentionally operator-invoked rather than presented as repository CI. The only currently working self-hosted runner is scoped to `granolacowboy.dev`, so this repository does not advertise a workflow that GitHub cannot allocate. Run paid evaluations from an explicitly authorized environment, record the exact model and server revision, and set `--max-model-turns` plus `--max-output-tokens` before the first billable call.
+Model-driven evaluation is intentionally operator-invoked rather than presented as repository CI. The only currently working self-hosted runner is scoped to `granolacowboy.dev`, so this repository does not advertise a workflow that GitHub cannot allocate. Run paid evaluations from an explicitly authorized environment, record the exact model and server revision, and set `--max-model-turns`, `--max-input-tokens`, and `--max-output-tokens` before the first billable call. With all three set, the harness checks the input budget before each generation request and records both the configured limits and observed usage in evidence.
 
 ## Extending scoring
 
