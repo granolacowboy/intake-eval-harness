@@ -1,0 +1,33 @@
+name: Evaluation assertion proposal
+description: Propose a new deterministic scorer or execution-trace assertion
+title: "[assertion] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: failure
+    attributes:
+      label: Failure mode
+      description: What agent/system failure cannot the current schema express?
+    validations:
+      required: true
+  - type: textarea
+    id: contract
+    attributes:
+      label: Proposed deterministic contract
+      description: Show the proposed XML and how pass/fail is computed without relying on an LLM judge.
+    validations:
+      required: true
+  - type: textarea
+    id: privacy
+    attributes:
+      label: Evidence and privacy impact
+      description: What raw inputs/results would need to be retained or published?
+    validations:
+      required: true
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Backward compatibility
+      description: Explain how existing question/answer suites remain valid, or why a breaking change is warranted.
+    validations:
+      required: true
