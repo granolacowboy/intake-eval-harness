@@ -24,9 +24,23 @@ from typing import Any, Callable
 from anthropic import Anthropic
 
 try:
+    from .assertions import (
+        evaluate_extended_constraints,
+        parse_positive_float,
+        parse_required_calls,
+        parse_result_assertions,
+    )
     from .connections import create_connection
+    from .reporters import compare_baseline, write_json_evidence, write_junit
 except ImportError:
+    from assertions import (
+        evaluate_extended_constraints,
+        parse_positive_float,
+        parse_required_calls,
+        parse_result_assertions,
+    )
     from connections import create_connection
+    from reporters import compare_baseline, write_json_evidence, write_junit
 
 
 EVALUATION_PROMPT = """You are an AI assistant with access to tools.
@@ -125,6 +139,14 @@ def parse_evaluation_file(file_path: Path) -> list[dict[str, Any]]:
                 "forbidden_tools": _child_texts(qa_pair, "./forbidden_tools/tool"),
                 "tool_order": _child_texts(qa_pair, "./tool_order/tool"),
                 "max_tool_calls": max_tool_calls,
+                "max_duration_s": parse_positive_float(
+                    qa_pair.findtext("max_duration_s"), "max_duration_s"
+                ),
+                "max_tool_duration_s": parse_positive_float(
+                    qa_pair.findtext("max_tool_duration_s"), "max_tool_duration_s"
+                ),
+                "required_calls": parse_required_calls(qa_pair),
+                "result_assertions": parse_result_assertions(qa_pair),
             })
 
         return evaluations
@@ -181,7 +203,11 @@ def evaluate_trace_constraints(
     return violations
 
 
-def _public_trace(tool_trace: list[dict[str, Any]], include_inputs: bool) -> list[dict[str, Any]]:
+def _public_trace(
+    tool_trace: list[dict[str, Any]],
+    include_inputs: bool,
+    include_results: bool,
+) -> list[dict[str, Any]]:
     public: list[dict[str, Any]] = []
     for event in tool_trace:
         item = {
@@ -191,6 +217,12 @@ def _public_trace(tool_trace: list[dict[str, Any]], include_inputs: bool) -> lis
         }
         if include_inputs:
             item["input"] = event["input"]
+        if include_results:
+            item["result"] = event.get("result_text")
+        elif event.get("result_text") is not None:
+            item["result_sha256"] = hashlib.sha256(
+                event["result_text"].encode("utf-8")
+            ).hexdigest()
         if event.get("error"):
             item["error"] = event["error"]
         public.append(item)
@@ -241,6 +273,7 @@ async def agent_loop(
                 "duration_s": time.time() - tool_start_ts,
                 "ok": ok,
                 "error": error,
+                "result_text": tool_response,
             })
             tool_results.append({
                 "type": "tool_result",
@@ -271,6 +304,7 @@ async def evaluate_single_task(
     connection: Any,
     task_index: int,
     include_tool_inputs: bool = False,
+    include_tool_results: bool = False,
 ) -> dict[str, Any]:
     start_time = time.time()
     print(f"Task {task_index + 1}: {qa_pair['question']}")
@@ -280,7 +314,11 @@ async def evaluate_single_task(
     summary = extract_xml_content(response, "summary")
     feedback = extract_xml_content(response, "feedback")
     answer_correct = score_answer(response_value, qa_pair["answer"], qa_pair.get("answer_match", "exact"))
+    total_duration = time.time() - start_time
     trace_violations = evaluate_trace_constraints(qa_pair, tool_trace)
+    trace_violations.extend(
+        evaluate_extended_constraints(qa_pair, tool_trace, total_duration)
+    )
     trace_valid = not trace_violations
 
     return {
@@ -292,8 +330,11 @@ async def evaluate_single_task(
         "trace_valid": trace_valid,
         "trace_violations": trace_violations,
         "score": int(answer_correct and trace_valid),
-        "total_duration": time.time() - start_time,
-        "tool_trace": _public_trace(tool_trace, include_tool_inputs),
+        "passed": bool(answer_correct and trace_valid),
+        "total_duration": total_duration,
+        "tool_trace": _public_trace(
+            tool_trace, include_tool_inputs, include_tool_results
+        ),
         "num_tool_calls": len(tool_trace),
         "summary": summary,
         "feedback": feedback,
@@ -376,7 +417,8 @@ async def run_evaluation(
     server_revision: str = "unknown",
     run_label: str = "unspecified",
     include_tool_inputs: bool = False,
-) -> tuple[str, dict[str, Any]]:
+    include_tool_results: bool = False,
+) -> tuple[str, dict[str, Any], dict[str, Any]]:
     print("🚀 Starting Evaluation")
     client = Anthropic()
     tools = await connection.list_tools()
@@ -393,6 +435,7 @@ async def run_evaluation(
         results.append(await evaluate_single_task(
             client, model, qa_pair, tools, connection, i,
             include_tool_inputs=include_tool_inputs,
+            include_tool_results=include_tool_results,
         ))
 
     correct = sum(r["score"] for r in results)
@@ -439,13 +482,30 @@ async def run_evaluation(
         for i, (qa_pair, result) in enumerate(zip(qa_pairs, results))
     )
 
-    return report, {
+    metrics = {
         "passing": correct,
         "total": len(results),
         "accuracy": accuracy,
         "answer_correct": answer_correct,
         "trace_valid": trace_valid,
+        "average_duration_s": average_duration_s,
+        "average_tool_calls": average_tool_calls,
+        "total_tool_calls": total_tool_calls,
     }
+    evidence = {
+        "schema_version": "1.0",
+        "provenance": {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "model": model,
+            "suite_sha256": hashlib.sha256(eval_path.read_bytes()).hexdigest(),
+            "harness_revision": detect_harness_revision(),
+            "server_revision": server_revision,
+            "run_label": run_label,
+        },
+        "summary": metrics,
+        "results": results,
+    }
+    return report, metrics, evidence
 
 
 def parse_headers(header_list: list[str] | None) -> dict[str, str]:
@@ -496,6 +556,11 @@ async def main() -> int:
     parser.add_argument("--server-revision", default="unknown", help="Commit/tag/digest of evaluated server")
     parser.add_argument("--run-label", default="unspecified", help="Human-readable experiment label")
     parser.add_argument("--include-tool-inputs", action="store_true", help="Include tool inputs in report")
+    parser.add_argument("--include-tool-results", action="store_true", help="Include raw tool results in report/evidence")
+    parser.add_argument("--json-output", type=Path, help="Write machine-readable JSON evidence")
+    parser.add_argument("--junit-output", type=Path, help="Write JUnit XML evidence")
+    parser.add_argument("--baseline", type=Path, help="Compare against a prior JSON evidence file")
+    parser.add_argument("--fail-on-regression", action="store_true", help="Fail if accuracy or trace-valid count regresses from --baseline")
     parser.add_argument("--fail-under", type=float, metavar="PERCENT", help="Fail if overall pass percentage is lower")
 
     args = parser.parse_args()
@@ -524,13 +589,14 @@ async def main() -> int:
     async with connection:
         print("✅ Connected successfully")
         try:
-            report, metrics = await run_evaluation(
+            report, metrics, evidence = await run_evaluation(
                 args.eval_file,
                 connection,
                 args.model,
                 server_revision=args.server_revision,
                 run_label=args.run_label,
                 include_tool_inputs=args.include_tool_inputs,
+                include_tool_results=args.include_tool_results,
             )
         except ValueError as exc:
             print(f"Error: {exc}")
@@ -541,6 +607,35 @@ async def main() -> int:
         print(f"\n✅ Report saved to {args.output}")
     else:
         print("\n" + report)
+
+    if args.json_output:
+        write_json_evidence(args.json_output, evidence)
+        print(f"✅ JSON evidence saved to {args.json_output}")
+    if args.junit_output:
+        write_junit(args.junit_output, evidence)
+        print(f"✅ JUnit evidence saved to {args.junit_output}")
+
+    regression = None
+    if args.baseline:
+        if not args.baseline.exists():
+            print(f"Error: baseline evidence not found: {args.baseline}")
+            return 2
+        regression = compare_baseline(args.baseline, evidence)
+        print(
+            "Baseline comparison: "
+            f"accuracy Δ {regression['accuracy_delta']:+.1f} points; "
+            f"trace-valid Δ {regression['trace_valid_delta']:+d}"
+        )
+        evidence["baseline_comparison"] = regression
+        if args.json_output:
+            write_json_evidence(args.json_output, evidence)
+
+    if args.fail_on_regression and args.baseline is None:
+        print("Error: --fail-on-regression requires --baseline")
+        return 2
+    if args.fail_on_regression and regression and regression["regressed"]:
+        print("❌ Regression gate failed")
+        return 4
 
     if args.fail_under is not None and metrics["accuracy"] < args.fail_under:
         print(f"❌ Quality gate failed: {metrics['accuracy']:.1f}% < {args.fail_under:.1f}%")
