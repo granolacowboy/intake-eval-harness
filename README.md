@@ -1,6 +1,6 @@
 # intake-eval-harness
 
-[![CI](https://github.com/granolacowboy/intake-eval-harness/actions/workflows/ci.yml/badge.svg)](https://github.com/granolacowboy/intake-eval-harness/actions/workflows/ci.yml)
+[![Verified](https://github.com/granolacowboy/granolacowboy.dev/actions/workflows/verify-intake-eval-harness.yml/badge.svg)](https://github.com/granolacowboy/granolacowboy.dev/actions/workflows/verify-intake-eval-harness.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 A small evaluation harness for tool-using MCP servers: run a fixed suite against a Model Context Protocol server, score the final answer, and enforce optional deterministic assertions over the tool trace. Extracted from [`intake-triage-mcp`](https://github.com/granolacowboy/intake-triage-mcp), and used to score that server's tools against golden expectations.
@@ -105,7 +105,7 @@ pip install -r requirements-dev.txt
 pytest -q
 ```
 
-GitHub Actions runs those tests on Python 3.10 and 3.12 and verifies that the CLI imports and renders `--help` successfully.
+The central portfolio verifier runs the offline suite against `main` and verifies that the CLI imports and renders `--help` successfully. The verification job lives in [`granolacowboy.dev`](https://github.com/granolacowboy/granolacowboy.dev/actions/workflows/verify-intake-eval-harness.yml) so it can use the working self-hosted runner shared by this public portfolio.
 
 ## Report
 
@@ -131,7 +131,7 @@ The baseline gate intentionally checks the aggregate pass percentage and trace-v
 
 ## CI
 
-The default CI validates the harness itself and stays offline. It deliberately does **not** spend model API credits.
+The central portfolio verifier validates the harness itself and stays offline. It deliberately does **not** spend model API credits.
 
 A separate **Manual model-driven evaluation** workflow checks out `intake-triage-mcp`, runs the golden suite only when explicitly dispatched, appends the report to the GitHub job summary, and uploads the Markdown report as a retained artifact. It requires an `ANTHROPIC_API_KEY` repository secret and accepts an explicit pass threshold.
 
