@@ -133,7 +133,7 @@ The baseline gate intentionally checks the aggregate pass percentage and trace-v
 
 The central portfolio verifier validates the harness itself and stays offline. It deliberately does **not** spend model API credits.
 
-A separate **Manual model-driven evaluation** workflow checks out `intake-triage-mcp`, runs the golden suite only when explicitly dispatched, appends the report to the GitHub job summary, and uploads the Markdown report as a retained artifact. It requires an `ANTHROPIC_API_KEY` repository secret and accepts an explicit pass threshold.
+Model-driven evaluation is intentionally operator-invoked rather than presented as repository CI. The only currently working self-hosted runner is scoped to `granolacowboy.dev`, so this repository does not advertise a workflow that GitHub cannot allocate. Run paid evaluations from an explicitly authorized environment, record the exact model and server revision, and set `--max-model-turns` plus `--max-output-tokens` before the first billable call.
 
 ## Extending scoring
 
@@ -141,7 +141,7 @@ The deterministic scorer registry is the `SCORERS` mapping in `evals/evaluation.
 
 ## Releases
 
-The project is installable as `mcp-eval` through `pyproject.toml`. A `v*` tag must match the package version, runs the offline tests, builds wheel/sdist artifacts, and creates or updates the corresponding GitHub Release.
+The project is installable as `mcp-eval` through `pyproject.toml`. Release automation is deliberately deferred while this personal account cannot allocate a runner to the repository. Before any tag is published, validate the tag against the package version, run the offline suite, build wheel/sdist artifacts, and attach only artifacts produced from that exact reviewed commit.
 
 ## Related
 
@@ -150,7 +150,7 @@ The project is installable as `mcp-eval` through `pyproject.toml`. A `v*` tag mu
 
 ## Example
 
-A runnable suite lives in [`examples/`](examples/): a 10-pair golden suite for `intake-triage-mcp` (conflict screening, matter validation, practice-area lookup, template drafting), each with an exact expected answer. Run it with the Quick start commands above, pointed at the suite file, then point the harness at your own server and suite to score it the same way.
+A runnable suite lives in [`examples/`](examples/) for `intake-triage-mcp` (conflict screening, matter validation, practice-area lookup, template drafting, and an unsafe-write refusal), each with an exact expected answer plus trace constraints where execution path matters. Run it with the Quick start commands above, pointed at the suite file, then point the harness at your own server and suite to score it the same way.
 
 ## License
 
