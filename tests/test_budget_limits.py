@@ -5,18 +5,24 @@ from evals.evaluation import agent_loop
 
 
 class _FakeMessages:
-    def __init__(self, responses):
+    def __init__(self, responses, token_counts=None):
         self.responses = list(responses)
+        self.token_counts = list(token_counts or [])
         self.calls = []
+        self.count_calls = []
 
     def create(self, **kwargs):
         self.calls.append(kwargs)
         return self.responses.pop(0)
 
+    def count_tokens(self, **kwargs):
+        self.count_calls.append(kwargs)
+        return SimpleNamespace(input_tokens=self.token_counts.pop(0))
+
 
 class _FakeClient:
-    def __init__(self, responses):
-        self.messages = _FakeMessages(responses)
+    def __init__(self, responses, token_counts=None):
+        self.messages = _FakeMessages(responses, token_counts)
 
 
 class _FakeConnection:
@@ -105,3 +111,59 @@ def test_agent_loop_records_usage_for_successful_run():
     assert usage["input_tokens"] == 17
     assert usage["output_tokens"] == 8
     assert all(call["max_tokens"] == 321 for call in client.messages.calls)
+
+
+
+def test_agent_loop_fails_closed_before_billable_call_when_input_budget_exceeded():
+    client = _FakeClient([_final_response()], token_counts=[501])
+    response, trace, violation, usage = asyncio.run(
+        agent_loop(
+            client,
+            "test-model",
+            "question",
+            [],
+            _FakeConnection(),
+            max_model_turns=2,
+            max_output_tokens=100,
+            max_input_tokens=500,
+        )
+    )
+
+    assert response is None
+    assert trace == []
+    assert violation == (
+        "input token limit exceeded (501 > 500); "
+        "evaluation stopped before billable model call"
+    )
+    assert client.messages.calls == []
+    assert len(client.messages.count_calls) == 1
+    assert usage["calls"] == 0
+    assert usage["preflight_calls"] == 1
+    assert usage["max_preflight_input_tokens"] == 501
+
+
+def test_agent_loop_preflights_each_billable_turn():
+    client = _FakeClient(
+        [_tool_response(1), _final_response()],
+        token_counts=[40, 45],
+    )
+    response, trace, violation, usage = asyncio.run(
+        agent_loop(
+            client,
+            "test-model",
+            "question",
+            [],
+            _FakeConnection(),
+            max_model_turns=2,
+            max_output_tokens=100,
+            max_input_tokens=50,
+        )
+    )
+
+    assert response == "<response>ok</response>"
+    assert violation is None
+    assert len(trace) == 1
+    assert len(client.messages.calls) == 2
+    assert len(client.messages.count_calls) == 2
+    assert usage["preflight_calls"] == 2
+    assert usage["max_preflight_input_tokens"] == 45
