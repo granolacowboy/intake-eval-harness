@@ -74,6 +74,8 @@ jobs:
             --server-revision "${{ steps.target.outputs.sha }}" \
             --run-label "github-actions/manual" \
             --fail-under "${{ inputs.fail_under }}" \
+            --json-output evaluation-evidence.json \
+            --junit-output evaluation-junit.xml \
             -o evaluation-report.md
 
       - name: Publish report to job summary
@@ -91,7 +93,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: evaluation-report-${{ steps.target.outputs.sha }}
-          path: evaluation-report.md
+          path: |
+            evaluation-report.md
+            evaluation-evidence.json
+            evaluation-junit.xml
           if-no-files-found: warn
           retention-days: 30
 
