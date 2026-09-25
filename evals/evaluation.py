@@ -438,6 +438,10 @@ async def run_evaluation(
             include_tool_results=include_tool_results,
         ))
 
+    generated_at = datetime.now(timezone.utc).isoformat()
+    suite_sha256 = hashlib.sha256(eval_path.read_bytes()).hexdigest()
+    harness_revision = detect_harness_revision()
+
     correct = sum(r["score"] for r in results)
     answer_correct = sum(int(r["answer_correct"]) for r in results)
     trace_valid = sum(int(r["trace_valid"]) for r in results)
@@ -447,10 +451,10 @@ async def run_evaluation(
     total_tool_calls = sum(r["num_tool_calls"] for r in results)
 
     report = REPORT_HEADER.format(
-        generated_at=datetime.now(timezone.utc).isoformat(),
+        generated_at=generated_at,
         model=model,
-        suite_sha256=hashlib.sha256(eval_path.read_bytes()).hexdigest(),
-        harness_revision=detect_harness_revision(),
+        suite_sha256=suite_sha256,
+        harness_revision=harness_revision,
         server_revision=server_revision,
         run_label=run_label,
         correct=correct,
@@ -495,10 +499,10 @@ async def run_evaluation(
     evidence = {
         "schema_version": "1.0",
         "provenance": {
-            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "generated_at": generated_at,
             "model": model,
-            "suite_sha256": hashlib.sha256(eval_path.read_bytes()).hexdigest(),
-            "harness_revision": detect_harness_revision(),
+            "suite_sha256": suite_sha256,
+            "harness_revision": harness_revision,
             "server_revision": server_revision,
             "run_label": run_label,
         },
@@ -571,6 +575,12 @@ async def main() -> int:
     if args.fail_under is not None and not 0 <= args.fail_under <= 100:
         print("Error: --fail-under must be between 0 and 100")
         return 2
+    if args.fail_on_regression and args.baseline is None:
+        print("Error: --fail-on-regression requires --baseline")
+        return 2
+    if args.baseline is not None and not args.baseline.exists():
+        print(f"Error: baseline evidence not found: {args.baseline}")
+        return 2
 
     try:
         connection = create_connection(
@@ -617,9 +627,6 @@ async def main() -> int:
 
     regression = None
     if args.baseline:
-        if not args.baseline.exists():
-            print(f"Error: baseline evidence not found: {args.baseline}")
-            return 2
         regression = compare_baseline(args.baseline, evidence)
         print(
             "Baseline comparison: "
@@ -630,9 +637,6 @@ async def main() -> int:
         if args.json_output:
             write_json_evidence(args.json_output, evidence)
 
-    if args.fail_on_regression and args.baseline is None:
-        print("Error: --fail-on-regression requires --baseline")
-        return 2
     if args.fail_on_regression and regression and regression["regressed"]:
         print("❌ Regression gate failed")
         return 4
