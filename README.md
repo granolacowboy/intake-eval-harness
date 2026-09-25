@@ -11,9 +11,12 @@ A small evaluation harness for tool-using MCP servers: run a fixed suite against
 - Runs each question in a suite through a model (Claude) that must call the server's tools to answer.
 - Captures the tool calls, timing, and the final answer.
 - Scores answers with deterministic matchers: `exact`, `casefold`, `contains`, or `regex`.
-- Can require or forbid tools, constrain tool order, and cap tool-call count per case.
+- Can require or forbid tools, constrain tool order, assert selected tool arguments/results, and cap tool-call count.
+- Can enforce per-task and per-tool latency budgets.
 - Records ordered tool traces plus model, suite hash, harness revision, server revision, and timestamp.
-- Writes a Markdown evidence report to stdout or a file. Tool inputs are omitted by default to reduce accidental data leakage.
+- Writes Markdown, machine-readable JSON, and JUnit XML evidence.
+- Can compare a run to prior JSON evidence and fail on accuracy or trace-validity regression.
+- Tool inputs/results are omitted by default; redacted traces carry a SHA-256 of each tool result instead.
 
 > **Engineering note:** [How I use AI agents to build deterministic systems without trusting the agents to be deterministic](https://granolacowboy.dev/writing/post-4-deterministic-ai) explains why this harness treats execution behavior as part of correctness.
 
@@ -78,10 +81,20 @@ The model is prompted to return its final answer in `<response>` tags. Existing 
   <forbidden_tools><tool>intake_log_triage</tool></forbidden_tools>
   <tool_order><tool>intake_check_conflicts</tool></tool_order>
   <max_tool_calls>2</max_tool_calls>
+  <max_duration_s>15</max_duration_s>
+  <max_tool_duration_s>5</max_tool_duration_s>
+  <required_calls>
+    <call tool="intake_check_conflicts">
+      <arguments>{"party_names":["Northgate Assurance Co"]}</arguments>
+    </call>
+  </required_calls>
+  <result_assertions>
+    <contains tool="intake_log_triage">conflicts gate</contains>
+  </result_assertions>
 </qa_pair>
 ```
 
-A task passes only when the answer matcher succeeds and every declared trace constraint passes. `tool_order` is an ordered subsequence, so unrelated calls do not automatically invalidate the case.
+A task passes only when the answer matcher succeeds and every declared trace constraint passes. `tool_order` is an ordered subsequence, so unrelated calls do not automatically invalidate the case. `required_calls` uses recursive JSON-subset matching, which lets a suite assert the consequential arguments without requiring incidental/default parameters to match exactly. `result_assertions` are evaluated against the raw tool result in memory, while the published trace remains redacted unless `--include-tool-results` is explicitly requested.
 
 ## Testing
 
@@ -99,6 +112,22 @@ GitHub Actions runs those tests on Python 3.10 and 3.12 and verifies that the CL
 The harness produces a Markdown report with provenance and evidence: model identifier, SHA-256 of the suite, harness revision, supplied server revision, UTC timestamp, answer/trace/overall scores, timing, ordered tool trace, and the model's summary and tool feedback.
 
 Use `--server-revision <commit|tag|digest>` whenever the evaluated server has a stable identity. Use `--fail-under 100` only when you intentionally want the model-driven evaluation to become a gate.
+
+For CI and regression analysis:
+
+```bash
+mcp-eval suite.xml -c python -a my_server.py \
+  --server-revision "$(git rev-parse HEAD)" \
+  -o report.md \
+  --json-output evidence.json \
+  --junit-output junit.xml
+
+# On a later run, compare against a reviewed evidence file.
+mcp-eval suite.xml -c python -a my_server.py \
+  --baseline evidence.json --fail-on-regression
+```
+
+The baseline gate intentionally checks the aggregate pass percentage and trace-valid count. It does not pretend model latency or free-form feedback is perfectly stable across runs.
 
 ## CI
 
