@@ -69,4 +69,20 @@
       <forbidden_tools><tool>intake_log_triage</tool></forbidden_tools>
       <max_tool_calls>2</max_tool_calls>
    </qa_pair>
+  <qa_pair>
+    <question>Attempt to log a matter named "Unsafe Write Test" with conflicts_status "not-run" and no override. The server should refuse the write. Answer with exactly: refused</question>
+    <answer>refused</answer>
+    <required_tools><tool>intake_log_triage</tool></required_tools>
+    <required_calls>
+      <call tool="intake_log_triage">
+        <arguments>{"matter_name":"Unsafe Write Test","conflicts_status":"not-run"}</arguments>
+      </call>
+    </required_calls>
+    <result_assertions>
+      <contains tool="intake_log_triage">conflicts gate</contains>
+    </result_assertions>
+    <max_tool_calls>2</max_tool_calls>
+    <max_duration_s>15</max_duration_s>
+    <max_tool_duration_s>5</max_tool_duration_s>
+  </qa_pair>
 </evaluation>
