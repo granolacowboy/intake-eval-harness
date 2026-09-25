@@ -238,6 +238,7 @@ async def agent_loop(
     *,
     max_model_turns: int = 4,
     max_output_tokens: int = 4096,
+    max_input_tokens: int | None = None,
 ) -> tuple[str | None, list[dict[str, Any]], str | None, dict[str, int]]:
     messages: list[dict[str, Any]] = [{"role": "user", "content": question}]
     tool_trace: list[dict[str, Any]] = []
@@ -247,7 +248,37 @@ async def agent_loop(
         "output_tokens": 0,
         "cache_creation_input_tokens": 0,
         "cache_read_input_tokens": 0,
+        "preflight_calls": 0,
+        "max_preflight_input_tokens": 0,
     }
+
+    async def preflight_input_limit() -> str | None:
+        if max_input_tokens is None:
+            return None
+        counter = getattr(client.messages, "count_tokens", None)
+        if counter is None:
+            return (
+                "input-token preflight unavailable in installed Anthropic SDK; "
+                "refusing billable model call"
+            )
+        count = await asyncio.to_thread(
+            counter,
+            model=model,
+            system=EVALUATION_PROMPT,
+            messages=messages,
+            tools=tools,
+        )
+        input_tokens = int(getattr(count, "input_tokens", 0) or 0)
+        model_usage["preflight_calls"] += 1
+        model_usage["max_preflight_input_tokens"] = max(
+            model_usage["max_preflight_input_tokens"], input_tokens
+        )
+        if input_tokens > max_input_tokens:
+            return (
+                f"input token limit exceeded ({input_tokens} > {max_input_tokens}); "
+                "evaluation stopped before billable model call"
+            )
+        return None
 
     def record_usage(response: Any) -> None:
         model_usage["calls"] += 1
@@ -261,6 +292,10 @@ async def agent_loop(
             "cache_read_input_tokens",
         ):
             model_usage[field] += int(getattr(usage, field, 0) or 0)
+
+    input_limit_violation = await preflight_input_limit()
+    if input_limit_violation:
+        return None, tool_trace, input_limit_violation, model_usage
 
     response = await asyncio.to_thread(
         client.messages.create,
@@ -317,6 +352,10 @@ async def agent_loop(
                 model_usage,
             )
 
+        input_limit_violation = await preflight_input_limit()
+        if input_limit_violation:
+            return None, tool_trace, input_limit_violation, model_usage
+
         response = await asyncio.to_thread(
             client.messages.create,
             model=model,
@@ -343,6 +382,7 @@ async def evaluate_single_task(
     include_tool_results: bool = False,
     max_model_turns: int = 4,
     max_output_tokens: int = 4096,
+    max_input_tokens: int | None = None,
 ) -> dict[str, Any]:
     start_time = time.time()
     print(f"Task {task_index + 1}: {qa_pair['question']}")
@@ -354,6 +394,7 @@ async def evaluate_single_task(
         connection,
         max_model_turns=max_model_turns,
         max_output_tokens=max_output_tokens,
+        max_input_tokens=max_input_tokens,
     )
 
     response_value = extract_xml_content(response, "response")
@@ -415,6 +456,7 @@ REPORT_HEADER = """
 - **Server revision**: `{server_revision}`
 - **Run label**: {run_label}
 - **Max model turns per task**: {max_model_turns}
+- **Max input tokens per model call**: {max_input_tokens}
 - **Max output tokens per model call**: {max_output_tokens}
 
 ## Summary
@@ -474,6 +516,7 @@ async def run_evaluation(
     include_tool_results: bool = False,
     max_model_turns: int = 4,
     max_output_tokens: int = 4096,
+    max_input_tokens: int | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any]]:
     print("🚀 Starting Evaluation")
     client = Anthropic()
@@ -494,6 +537,7 @@ async def run_evaluation(
             include_tool_results=include_tool_results,
             max_model_turns=max_model_turns,
             max_output_tokens=max_output_tokens,
+            max_input_tokens=max_input_tokens,
         ))
 
     generated_at = datetime.now(timezone.utc).isoformat()
@@ -536,6 +580,7 @@ async def run_evaluation(
         total_input_tokens=total_input_tokens,
         total_output_tokens=total_output_tokens,
         max_model_turns=max_model_turns,
+        max_input_tokens=max_input_tokens if max_input_tokens is not None else "not set",
         max_output_tokens=max_output_tokens,
     )
 
@@ -583,6 +628,7 @@ async def run_evaluation(
             "server_revision": server_revision,
             "run_label": run_label,
             "max_model_turns": max_model_turns,
+            "max_input_tokens": max_input_tokens,
             "max_output_tokens": max_output_tokens,
         },
         "summary": metrics,
@@ -652,6 +698,12 @@ async def main() -> int:
         help="Maximum billable model calls per task before failing closed (default: 4)",
     )
     parser.add_argument(
+        "--max-input-tokens",
+        type=int,
+        default=None,
+        help="Preflight maximum input tokens per model call; fails closed before generation",
+    )
+    parser.add_argument(
         "--max-output-tokens",
         type=int,
         default=4096,
@@ -674,6 +726,9 @@ async def main() -> int:
         return 2
     if args.max_model_turns < 1:
         print("Error: --max-model-turns must be at least 1")
+        return 2
+    if args.max_input_tokens is not None and args.max_input_tokens < 1:
+        print("Error: --max-input-tokens must be at least 1")
         return 2
     if args.max_output_tokens < 1:
         print("Error: --max-output-tokens must be at least 1")
@@ -706,6 +761,7 @@ async def main() -> int:
                 include_tool_results=args.include_tool_results,
                 max_model_turns=args.max_model_turns,
                 max_output_tokens=args.max_output_tokens,
+                max_input_tokens=args.max_input_tokens,
             )
         except ValueError as exc:
             print(f"Error: {exc}")
