@@ -42,3 +42,7 @@ If ordering is itself an invariant, add `<tool_order>` with the required subsequ
 ## Pull requests
 
 Keep PRs focused. Run the offline suite before opening one. Model-driven runs are intentionally manual because they incur external API use and can vary with model behavior.
+
+## Public Git history
+
+Preserve useful engineering rationale in commits and pull requests, but keep agent/model attribution, session provenance, prompt transcripts, and tool chatter out of the public history. See the [account-level public development policy](https://github.com/granolacowboy/.github/blob/main/PUBLIC_DEVELOPMENT.md).
